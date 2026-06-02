@@ -6,6 +6,7 @@ package tmux
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -167,6 +168,19 @@ func (c *Client) PaneCurrentCommand(session, window string) (string, error) {
 // CapturePane returns the visible contents of the window's active pane.
 func (c *Client) CapturePane(session, window string) (string, error) {
 	return c.run("capture-pane", "-p", "-t", session+":"+window)
+}
+
+// Attach switches focus to the given window. If called from inside tmux
+// ($TMUX is set) it uses switch-client so the outer session doesn't nest;
+// otherwise it attaches a new client.
+func (c *Client) Attach(session, window string) error {
+	target := session + ":" + window
+	if os.Getenv("TMUX") != "" {
+		_, err := c.run("switch-client", "-t", target)
+		return err
+	}
+	_, err := c.run("attach-session", "-t", target)
+	return err
 }
 
 // KillServer terminates this tmux server. Useful for tearing down a test-only socket.
