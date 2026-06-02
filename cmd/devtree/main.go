@@ -4,13 +4,16 @@ import (
 	"fmt"
 	"os"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/matthewtole/devtree/internal/config"
+	"github.com/matthewtole/devtree/internal/tui"
 )
 
 const usage = `devtree — control which git worktree your dev servers run in
 
 Usage:
-  devtree              launch the TUI (not yet implemented)
+  devtree              launch the TUI
   devtree config check validate the config file and print parsed services
   devtree help         show this message
 `
@@ -24,7 +27,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("TUI not yet implemented — try `devtree config check`")
+		return runTUI()
 	}
 
 	switch args[0] {
@@ -36,6 +39,20 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q (try `devtree help`)", args[0])
 	}
+}
+
+func runTUI() error {
+	path, err := config.DefaultPath()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	p := tea.NewProgram(tui.New(cfg), tea.WithAltScreen())
+	_, err = p.Run()
+	return err
 }
 
 func runConfig(args []string) error {
