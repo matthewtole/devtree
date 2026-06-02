@@ -48,6 +48,7 @@ type serviceRow struct {
 	worktree string        // full path stored in tmux user option; empty = unset
 	status   serviceStatus
 	command  string        // current pane_current_command
+	snippet  []string      // last few lines of pane output
 }
 
 // worktreeLabel returns a short label for the worktree column.
@@ -227,14 +228,15 @@ func (m Model) View() string {
 }
 
 func (m Model) mainView() string {
+	divWidth := colService + colWorktree + 16
 	var b strings.Builder
 
 	b.WriteString("\n  " + styleTitle.Render("devtree") + "\n\n")
 
-	// Header
+	// Service table
 	header := fmt.Sprintf("  %-*s  %-*s  %s", colService, "service", colWorktree, "worktree", "status")
 	b.WriteString(styleHeaderRow.Render(header) + "\n")
-	b.WriteString(styleDivider.Render("  "+strings.Repeat("─", colService+colWorktree+16)) + "\n")
+	b.WriteString(styleDivider.Render("  "+strings.Repeat("─", divWidth)) + "\n")
 
 	for i, row := range m.rows {
 		var cursor string
@@ -256,12 +258,60 @@ func (m Model) mainView() string {
 		b.WriteString("\n")
 	}
 
+	// Output panel for selected service
+	b.WriteString("\n")
+	if len(m.rows) > 0 {
+		sel := m.rows[m.cursor]
+		label := sel.svc.Name
+		dashes := strings.Repeat("─", max(0, divWidth-len(label)-5))
+		b.WriteString(styleDivider.Render("  ─── "+label+" "+dashes) + "\n")
+
+		maxWidth := m.width - 4 // 2-char indent + 2 margin
+		if maxWidth < 20 {
+			maxWidth = 76
+		}
+
+		if sel.status == statusAbsent {
+			b.WriteString("  " + styleIdle.Render("not started") + "\n")
+		} else if len(sel.snippet) == 0 {
+			b.WriteString("  " + styleIdle.Render("no output") + "\n")
+		} else {
+			for _, line := range sel.snippet {
+				b.WriteString("  " + styleNormal.Render(truncateLine(line, maxWidth)) + "\n")
+			}
+		}
+	}
+
 	b.WriteString("\n")
 	b.WriteString("  " + styleHelp.Render(
 		"↑/k  ↓/j  navigate    ↵/w  switch worktree    s  start    x  stop    r  restart    a  attach    q  quit",
 	) + "\n")
 
 	return b.String()
+}
+
+// lastNonEmptyLines returns the last n non-empty lines from s.
+func lastNonEmptyLines(s string, n int) []string {
+	all := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	var lines []string
+	for _, l := range all {
+		if strings.TrimSpace(l) != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines
+}
+
+// truncateLine clips s to max runes, appending … if trimmed.
+func truncateLine(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max-1]) + "…"
 }
 
 // --- poll ---------------------------------------------------------------
@@ -306,6 +356,11 @@ func cmdPoll(tc *tmux.Client, rows []serviceRow) tea.Cmd {
 				return errMsg{err}
 			}
 			updated.worktree = wt
+
+			if content, err := tc.CapturePane(SessionName, row.svc.Name); err == nil {
+				updated.snippet = lastNonEmptyLines(content, 5)
+			}
+
 			result[i] = updated
 		}
 		return stateMsg(result)

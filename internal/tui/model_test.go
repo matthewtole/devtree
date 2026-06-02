@@ -358,6 +358,44 @@ func TestIsShell(t *testing.T) {
 	}
 }
 
+func TestLastNonEmptyLines(t *testing.T) {
+	tests := []struct {
+		in   string
+		n    int
+		want []string
+	}{
+		{"a\nb\nc\n\n\n", 2, []string{"b", "c"}},
+		{"a\nb\n", 5, []string{"a", "b"}},
+		{"\n\n\n", 3, nil},
+		{"a\n  \nb\n", 3, []string{"a", "b"}},
+	}
+	for _, tc := range tests {
+		got := lastNonEmptyLines(tc.in, tc.n)
+		if len(got) != len(tc.want) {
+			t.Errorf("lastNonEmptyLines(%q, %d) = %v, want %v", tc.in, tc.n, got, tc.want)
+			continue
+		}
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Errorf("lastNonEmptyLines result[%d] = %q, want %q", i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+func TestTruncateLine(t *testing.T) {
+	if got := truncateLine("hello", 10); got != "hello" {
+		t.Errorf("short string modified: %q", got)
+	}
+	got := truncateLine("hello world", 8)
+	if len([]rune(got)) != 8 {
+		t.Errorf("truncated length = %d, want 8", len([]rune(got)))
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncated string should end with …, got %q", got)
+	}
+}
+
 func TestShellEscape(t *testing.T) {
 	tests := []struct {
 		in   string
