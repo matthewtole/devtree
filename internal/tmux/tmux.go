@@ -88,9 +88,19 @@ func (c *Client) EnsureSession(name string) error {
 func (c *Client) ListWindows(session string) ([]string, error) {
 	out, err := c.run("list-windows", "-t", session, "-F", "#{window_name}")
 	if err != nil {
+		if isNoServer(err) || isNotFound(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return splitLines(out), nil
+}
+
+// isNotFound detects tmux errors meaning a named target doesn't exist.
+func isNotFound(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "session not found") ||
+		strings.Contains(s, "no current session")
 }
 
 func (c *Client) HasWindow(session, window string) (bool, error) {
