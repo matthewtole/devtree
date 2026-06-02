@@ -170,6 +170,14 @@ func (c *Client) CapturePane(session, window string) (string, error) {
 	return c.run("capture-pane", "-p", "-t", session+":"+window)
 }
 
+// CapturePaneN captures the last nLines of content from the pane, including
+// scrollback history above the visible area.
+func (c *Client) CapturePaneN(session, window string, nLines int) (string, error) {
+	return c.run("capture-pane", "-p",
+		"-S", fmt.Sprintf("-%d", nLines),
+		"-t", session+":"+window)
+}
+
 // Attach switches focus to the given window. If called from inside tmux
 // ($TMUX is set) it uses switch-client so the outer session doesn't nest;
 // otherwise it attaches a new client.

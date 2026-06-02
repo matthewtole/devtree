@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/matthewtole/devtree/internal/config"
 	"github.com/matthewtole/devtree/internal/tmux"
@@ -17,6 +18,15 @@ const (
 	SessionName  = "devtree"
 	pollInterval = 500 * time.Millisecond
 
+	// leftPanelWidth is the fixed width of the service list panel.
+	leftPanelWidth = 30
+	// divider is the string placed between the two panels.
+	divider = " │ "
+)
+
+// These are kept for the table layout inside the picker, which is still a
+// single-column view.
+const (
 	colService  = 18
 	colWorktree = 30
 )
@@ -24,11 +34,24 @@ const (
 type serviceStatus int
 
 const (
-	statusUnknown  serviceStatus = iota
-	statusRunning                // pane has a non-shell foreground process
-	statusIdle                   // pane is at a shell prompt
-	statusAbsent                 // window doesn't exist in tmux yet
+	statusUnknown serviceStatus = iota
+	statusRunning               // pane has a non-shell foreground process
+	statusIdle                  // pane is at a shell prompt
+	statusAbsent                // window doesn't exist in tmux yet
 )
+
+func (s serviceStatus) dot() string {
+	switch s {
+	case statusRunning:
+		return styleRunning.Render("●")
+	case statusIdle:
+		return styleIdle.Render("○")
+	case statusAbsent:
+		return styleAbsent.Render("◌")
+	default:
+		return styleUnknown.Render("?")
+	}
+}
 
 func (s serviceStatus) String() string {
 	switch s {
@@ -47,11 +70,10 @@ type serviceRow struct {
 	svc      config.Service
 	worktree string        // full path stored in tmux user option; empty = unset
 	status   serviceStatus
-	command  string        // current pane_current_command
-	snippet  []string      // last few lines of pane output
+	command  string   // current pane_current_command
+	snippet  []string // lines from capture-pane, trailing blanks stripped
 }
 
-// worktreeLabel returns a short label for the worktree column.
 func (r serviceRow) worktreeLabel() string {
 	if r.worktree == "" {
 		return styleIdle.Render("—")
@@ -59,8 +81,6 @@ func (r serviceRow) worktreeLabel() string {
 	return filepath.Base(r.worktree)
 }
 
-// effectiveWorktree returns the worktree to use for start/restart — the
-// stored one if set, otherwise the service's repo root.
 func (r serviceRow) effectiveWorktree() string {
 	if r.worktree != "" {
 		return r.worktree
@@ -80,7 +100,6 @@ type Model struct {
 	picker *pickerModel
 }
 
-// New returns a Model initialised from cfg. It uses the default tmux server.
 func New(cfg *config.Config) Model {
 	rows := make([]serviceRow, len(cfg.Services))
 	for i, s := range cfg.Services {
@@ -98,13 +117,10 @@ type errMsg struct{ err error }
 // --- tea.Model ----------------------------------------------------------
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(cmdPoll(m.tc, m.rows), cmdTick())
+	return tea.Batch(cmdPoll(m.tc, m.rows, 0), cmdTick())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// When the picker is open, intercept worktree-load results and route
-	// everything else through it. Check Cancelled/Selected synchronously
-	// after each update so there's no extra message round-trip.
 	if m.picker != nil {
 		if wt, ok := msg.(worktreesLoadedMsg); ok {
 			if wt.err != nil {
@@ -141,7 +157,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
-
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
@@ -150,14 +165,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor < len(m.rows)-1 {
 				m.cursor++
 			}
-
 		case "enter", "w":
 			if m.ready && len(m.rows) > 0 {
 				p := newPicker(m.rows[m.cursor].svc)
 				m.picker = &p
 				return m, cmdLoadWorktrees(m.rows[m.cursor].svc.Repo)
 			}
-
 		case "s":
 			if m.ready && len(m.rows) > 0 {
 				row := m.rows[m.cursor]
@@ -166,7 +179,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						row.svc.Command, row.effectiveWorktree())
 				}
 			}
-
 		case "x":
 			if m.ready && len(m.rows) > 0 {
 				row := m.rows[m.cursor]
@@ -174,7 +186,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, cmdStop(m.tc, SessionName, row.svc.Name)
 				}
 			}
-
 		case "r":
 			if m.ready && len(m.rows) > 0 {
 				row := m.rows[m.cursor]
@@ -183,7 +194,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						row.svc.Command, row.effectiveWorktree())
 				}
 			}
-
 		case "a":
 			if m.ready && len(m.rows) > 0 {
 				row := m.rows[m.cursor]
@@ -201,12 +211,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.err = msg.err
 
-	// Mutation result messages don't need to update model state directly —
-	// the next poll tick will reflect the new tmux state.
 	case startedMsg, stoppedMsg, switchedMsg:
 
 	case tickMsg:
-		return m, tea.Batch(cmdPoll(m.tc, m.rows), cmdTick())
+		return m, tea.Batch(cmdPoll(m.tc, m.rows, m.height), cmdTick())
 	}
 
 	return m, nil
@@ -219,78 +227,194 @@ func (m Model) View() string {
 	if !m.ready {
 		return "\n  loading…\n"
 	}
-
 	if m.picker != nil {
 		return m.picker.View()
 	}
-
 	return m.mainView()
 }
 
+// --- split layout -------------------------------------------------------
+
 func (m Model) mainView() string {
-	divWidth := colService + colWorktree + 16
+	// 3 lines: "\n  devtree\n\n" before panels; 2 lines: "\n  help\n" after.
+	contentH := m.height - 5
+	if contentH < 5 || m.height == 0 {
+		contentH = 18 // sensible fallback before WindowSizeMsg arrives
+	}
+
+	rightW := m.width - leftPanelWidth - len(divider)
+	if rightW < 20 || m.width == 0 {
+		rightW = 44
+	}
+
+	leftLines := m.buildLeftPanel(contentH, leftPanelWidth)
+	rightLines := m.buildRightPanel(contentH, rightW)
+
 	var b strings.Builder
-
 	b.WriteString("\n  " + styleTitle.Render("devtree") + "\n\n")
-
-	// Service table
-	header := fmt.Sprintf("  %-*s  %-*s  %s", colService, "service", colWorktree, "worktree", "status")
-	b.WriteString(styleHeaderRow.Render(header) + "\n")
-	b.WriteString(styleDivider.Render("  "+strings.Repeat("─", divWidth)) + "\n")
-
-	for i, row := range m.rows {
-		var cursor string
-		if i == m.cursor {
-			cursor = styleCursor.Render("▸") + " "
-		} else {
-			cursor = "  "
-		}
-
-		wt := fmt.Sprintf("%-*s", colWorktree, row.worktreeLabel())
-		svc := fmt.Sprintf("%-*s", colService, row.svc.Name)
-		line := cursor + svc + "  " + wt + "  " + row.status.String()
-
-		if i == m.cursor {
-			b.WriteString(styleSelected.Render(line))
-		} else {
-			b.WriteString(styleNormal.Render(line))
-		}
-		b.WriteString("\n")
+	for i := 0; i < contentH; i++ {
+		l := padToWidth(leftLines[i], leftPanelWidth)
+		r := rightLines[i]
+		b.WriteString(l + divider + r + "\n")
 	}
-
-	// Output panel for selected service
-	b.WriteString("\n")
-	if len(m.rows) > 0 {
-		sel := m.rows[m.cursor]
-		label := sel.svc.Name
-		dashes := strings.Repeat("─", max(0, divWidth-len(label)-5))
-		b.WriteString(styleDivider.Render("  ─── "+label+" "+dashes) + "\n")
-
-		maxWidth := m.width - 4 // 2-char indent + 2 margin
-		if maxWidth < 20 {
-			maxWidth = 76
-		}
-
-		if sel.status == statusAbsent {
-			b.WriteString("  " + styleIdle.Render("not started") + "\n")
-		} else if len(sel.snippet) == 0 {
-			b.WriteString("  " + styleIdle.Render("no output") + "\n")
-		} else {
-			for _, line := range sel.snippet {
-				b.WriteString("  " + styleNormal.Render(truncateLine(line, maxWidth)) + "\n")
-			}
-		}
-	}
-
 	b.WriteString("\n")
 	b.WriteString("  " + styleHelp.Render(
 		"↑/k  ↓/j  navigate    ↵/w  switch worktree    s  start    x  stop    r  restart    a  attach    q  quit",
 	) + "\n")
-
 	return b.String()
 }
 
-// lastNonEmptyLines returns the last n non-empty lines from s.
+func (m Model) buildLeftPanel(height, width int) []string {
+	lines := make([]string, height)
+	for i := range lines {
+		lines[i] = ""
+	}
+	if height < 2 {
+		return lines
+	}
+
+	lines[0] = styleHeaderRow.Render("  services")
+	lines[1] = styleDivider.Render("  " + strings.Repeat("─", width-2))
+
+	// Max chars available for the service name: width minus cursor(2) dot(2) gap(2).
+	nameMax := width - 6
+
+	for i, row := range m.rows {
+		li := i + 2
+		if li >= height {
+			break
+		}
+		cursor := "  "
+		if i == m.cursor {
+			cursor = styleCursor.Render("▸") + " "
+		}
+		name := truncateLine(row.svc.Name, nameMax)
+		line := cursor + fmt.Sprintf("%-*s", nameMax, name) + "  " + row.status.dot()
+		if i == m.cursor {
+			line = styleSelected.Render(line)
+		}
+		lines[li] = line
+	}
+	return lines
+}
+
+func (m Model) buildRightPanel(height, width int) []string {
+	lines := make([]string, height)
+	for i := range lines {
+		lines[i] = ""
+	}
+	if height < 2 || len(m.rows) == 0 {
+		return lines
+	}
+
+	sel := m.rows[m.cursor]
+
+	// Header: service name + worktree if known.
+	header := styleSelected.Render(sel.svc.Name)
+	if sel.worktree != "" {
+		header += styleHeaderRow.Render("  " + filepath.Base(sel.worktree))
+	}
+	lines[0] = header
+	lines[1] = styleDivider.Render(strings.Repeat("─", width))
+
+	logHeight := height - 2
+	switch {
+	case sel.status == statusAbsent:
+		lines[2] = styleIdle.Render("not started")
+	case len(sel.snippet) == 0:
+		lines[2] = styleIdle.Render("no output")
+	default:
+		snip := sel.snippet
+		if len(snip) > logHeight {
+			snip = snip[len(snip)-logHeight:]
+		}
+		for i, line := range snip {
+			lines[2+i] = truncateLine(line, width)
+		}
+	}
+	return lines
+}
+
+// --- poll ---------------------------------------------------------------
+
+func cmdTick() tea.Cmd {
+	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+func cmdPoll(tc *tmux.Client, rows []serviceRow, termHeight int) tea.Cmd {
+	// Request enough lines to fill the log panel plus headroom.
+	logLines := termHeight - 7
+	if logLines < 50 {
+		logLines = 50
+	}
+
+	snapshot := make([]serviceRow, len(rows))
+	copy(snapshot, rows)
+
+	return func() tea.Msg {
+		result := make([]serviceRow, len(snapshot))
+		for i, row := range snapshot {
+			updated := row
+
+			has, err := tc.HasWindow(SessionName, row.svc.Name)
+			if err != nil {
+				return errMsg{err}
+			}
+			if !has {
+				updated.status = statusAbsent
+				updated.worktree = ""
+				updated.snippet = nil
+				result[i] = updated
+				continue
+			}
+
+			cmd, err := tc.PaneCurrentCommand(SessionName, row.svc.Name)
+			if err != nil {
+				return errMsg{err}
+			}
+			updated.command = cmd
+			if isShell(cmd) {
+				updated.status = statusIdle
+			} else {
+				updated.status = statusRunning
+			}
+
+			wt, err := tc.GetUserOption(SessionName, row.svc.Name, "worktree")
+			if err != nil {
+				return errMsg{err}
+			}
+			updated.worktree = wt
+
+			if content, err := tc.CapturePaneN(SessionName, row.svc.Name, logLines); err == nil {
+				updated.snippet = trimTrailingBlanks(content)
+			}
+
+			result[i] = updated
+		}
+		return stateMsg(result)
+	}
+}
+
+var shellNames = map[string]bool{
+	"bash": true, "zsh": true, "fish": true, "sh":  true,
+	"dash": true, "ksh": true, "tcsh": true, "csh": true,
+}
+
+func isShell(cmd string) bool { return shellNames[cmd] }
+
+// --- helpers ------------------------------------------------------------
+
+// trimTrailingBlanks splits s into lines and removes only the trailing empty
+// ones, preserving internal blank lines that are part of log structure.
+func trimTrailingBlanks(s string) []string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+// lastNonEmptyLines returns the last n lines that are not blank.
 func lastNonEmptyLines(s string, n int) []string {
 	all := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	var lines []string
@@ -314,64 +438,12 @@ func truncateLine(s string, max int) string {
 	return string(runes[:max-1]) + "…"
 }
 
-// --- poll ---------------------------------------------------------------
-
-func cmdTick() tea.Cmd {
-	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return tickMsg{} })
-}
-
-func cmdPoll(tc *tmux.Client, rows []serviceRow) tea.Cmd {
-	snapshot := make([]serviceRow, len(rows))
-	copy(snapshot, rows)
-
-	return func() tea.Msg {
-		result := make([]serviceRow, len(snapshot))
-		for i, row := range snapshot {
-			updated := row
-
-			has, err := tc.HasWindow(SessionName, row.svc.Name)
-			if err != nil {
-				return errMsg{err}
-			}
-			if !has {
-				updated.status = statusAbsent
-				updated.worktree = ""
-				result[i] = updated
-				continue
-			}
-
-			cmd, err := tc.PaneCurrentCommand(SessionName, row.svc.Name)
-			if err != nil {
-				return errMsg{err}
-			}
-			updated.command = cmd
-			if isShell(cmd) {
-				updated.status = statusIdle
-			} else {
-				updated.status = statusRunning
-			}
-
-			wt, err := tc.GetUserOption(SessionName, row.svc.Name, "worktree")
-			if err != nil {
-				return errMsg{err}
-			}
-			updated.worktree = wt
-
-			if content, err := tc.CapturePane(SessionName, row.svc.Name); err == nil {
-				updated.snippet = lastNonEmptyLines(content, 5)
-			}
-
-			result[i] = updated
-		}
-		return stateMsg(result)
+// padToWidth pads s with spaces to reach the target visible width,
+// accounting for ANSI escape sequences already in s.
+func padToWidth(s string, width int) string {
+	vis := lipgloss.Width(s)
+	if vis >= width {
+		return s
 	}
-}
-
-var shellNames = map[string]bool{
-	"bash": true, "zsh": true, "fish": true, "sh":  true,
-	"dash": true, "ksh": true, "tcsh": true, "csh": true,
-}
-
-func isShell(cmd string) bool {
-	return shellNames[cmd]
+	return s + strings.Repeat(" ", width-vis)
 }

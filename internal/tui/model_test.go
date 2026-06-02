@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/matthewtole/devtree/internal/config"
 	"github.com/matthewtole/devtree/internal/git"
@@ -355,6 +356,58 @@ func TestIsShell(t *testing.T) {
 		if isShell(s) {
 			t.Errorf("isShell(%q) = true, want false", s)
 		}
+	}
+}
+
+func TestTrimTrailingBlanks(t *testing.T) {
+	tests := []struct {
+		in   string
+		want []string
+	}{
+		{"a\nb\n\n\n", []string{"a", "b"}},
+		{"a\n\nb\n", []string{"a", "", "b"}}, // internal blank preserved
+		{"\n\n", nil},
+		{"a", []string{"a"}},
+	}
+	for _, tc := range tests {
+		got := trimTrailingBlanks(tc.in)
+		if len(got) != len(tc.want) {
+			t.Errorf("trimTrailingBlanks(%q) = %v, want %v", tc.in, got, tc.want)
+			continue
+		}
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Errorf("[%d] got %q, want %q", i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+func TestPadToWidth(t *testing.T) {
+	got := padToWidth("hi", 10)
+	if lipgloss.Width(got) != 10 {
+		t.Errorf("padToWidth visible width = %d, want 10", lipgloss.Width(got))
+	}
+	// Should not shrink strings that are already wide enough.
+	long := strings.Repeat("x", 20)
+	if padToWidth(long, 10) != long {
+		t.Error("padToWidth should not truncate")
+	}
+}
+
+func TestModel_splitViewContainsServiceNames(t *testing.T) {
+	m := withState(testModel())
+	m.width = 120
+	m.height = 30
+	view := m.View()
+	for _, name := range []string{"backend", "web", "storybook"} {
+		if !strings.Contains(view, name) {
+			t.Errorf("split view missing service name %q", name)
+		}
+	}
+	// Right panel header for the selected service (backend) should be visible.
+	if !strings.Contains(view, "│") {
+		t.Error("split view should contain the panel divider │")
 	}
 }
 
