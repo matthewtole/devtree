@@ -58,6 +58,15 @@ func (r serviceRow) worktreeLabel() string {
 	return filepath.Base(r.worktree)
 }
 
+// effectiveWorktree returns the worktree to use for start/restart — the
+// stored one if set, otherwise the service's repo root.
+func (r serviceRow) effectiveWorktree() string {
+	if r.worktree != "" {
+		return r.worktree
+	}
+	return r.svc.Repo
+}
+
 // Model is the root bubbletea model.
 type Model struct {
 	rows   []serviceRow
@@ -67,6 +76,7 @@ type Model struct {
 	err    error
 	width  int
 	height int
+	picker *pickerModel
 }
 
 // New returns a Model initialised from cfg. It uses the default tmux server.
@@ -91,6 +101,35 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// When the picker is open, intercept worktree-load results and route
+	// everything else through it. Check Cancelled/Selected synchronously
+	// after each update so there's no extra message round-trip.
+	if m.picker != nil {
+		if wt, ok := msg.(worktreesLoadedMsg); ok {
+			if wt.err != nil {
+				m.picker = nil
+				m.err = wt.err
+				return m, nil
+			}
+			p := m.picker.withWorktrees(wt.worktrees)
+			m.picker = &p
+			return m, nil
+		}
+
+		p, cmd := m.picker.Update(msg)
+		if p.Cancelled {
+			m.picker = nil
+			return m, nil
+		}
+		if p.Selected != nil {
+			row := m.rows[m.cursor]
+			m.picker = nil
+			return m, cmdSwitch(m.tc, SessionName, row.svc.Name, row.svc.Command, p.Selected.Path)
+		}
+		m.picker = &p
+		return m, cmd
+	}
+
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
@@ -101,6 +140,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
@@ -108,6 +148,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "down", "j":
 			if m.cursor < len(m.rows)-1 {
 				m.cursor++
+			}
+
+		case "enter", "w":
+			if m.ready && len(m.rows) > 0 {
+				p := newPicker(m.rows[m.cursor].svc)
+				m.picker = &p
+				return m, cmdLoadWorktrees(m.rows[m.cursor].svc.Repo)
+			}
+
+		case "s":
+			if m.ready && len(m.rows) > 0 {
+				row := m.rows[m.cursor]
+				if row.status != statusRunning {
+					return m, cmdStart(m.tc, SessionName, row.svc.Name,
+						row.svc.Command, row.effectiveWorktree())
+				}
+			}
+
+		case "x":
+			if m.ready && len(m.rows) > 0 {
+				row := m.rows[m.cursor]
+				if row.status == statusRunning || row.status == statusIdle {
+					return m, cmdStop(m.tc, SessionName, row.svc.Name)
+				}
+			}
+
+		case "r":
+			if m.ready && len(m.rows) > 0 {
+				row := m.rows[m.cursor]
+				if row.status != statusAbsent {
+					return m, cmdRestart(m.tc, SessionName, row.svc.Name,
+						row.svc.Command, row.effectiveWorktree())
+				}
+			}
+
+		case "a":
+			if m.ready && len(m.rows) > 0 {
+				row := m.rows[m.cursor]
+				if row.status != statusAbsent {
+					return m, cmdAttach(m.tc, SessionName, row.svc.Name)
+				}
 			}
 		}
 
@@ -118,6 +199,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		m.err = msg.err
+
+	// Mutation result messages don't need to update model state directly —
+	// the next poll tick will reflect the new tmux state.
+	case startedMsg, stoppedMsg, switchedMsg:
 
 	case tickMsg:
 		return m, tea.Batch(cmdPoll(m.tc, m.rows), cmdTick())
@@ -134,6 +219,14 @@ func (m Model) View() string {
 		return "\n  loading…\n"
 	}
 
+	if m.picker != nil {
+		return m.picker.View()
+	}
+
+	return m.mainView()
+}
+
+func (m Model) mainView() string {
 	var b strings.Builder
 
 	b.WriteString("\n  " + styleTitle.Render("devtree") + "\n\n")
@@ -164,20 +257,20 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString("  " + styleHelp.Render("↑/k  ↓/j  navigate    q  quit") + "\n")
+	b.WriteString("  " + styleHelp.Render(
+		"↑/k  ↓/j  navigate    ↵/w  switch worktree    s  start    x  stop    r  restart    a  attach    q  quit",
+	) + "\n")
 
 	return b.String()
 }
 
-// --- commands -----------------------------------------------------------
+// --- poll ---------------------------------------------------------------
 
 func cmdTick() tea.Cmd {
 	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
 func cmdPoll(tc *tmux.Client, rows []serviceRow) tea.Cmd {
-	// Capture a snapshot of the current rows so the goroutine works on
-	// immutable data and the model can be updated freely in the meantime.
 	snapshot := make([]serviceRow, len(rows))
 	copy(snapshot, rows)
 
@@ -220,8 +313,8 @@ func cmdPoll(tc *tmux.Client, rows []serviceRow) tea.Cmd {
 }
 
 var shellNames = map[string]bool{
-	"bash": true, "zsh": true, "fish": true, "sh":   true,
-	"dash": true, "ksh": true, "tcsh": true, "csh":  true,
+	"bash": true, "zsh": true, "fish": true, "sh":  true,
+	"dash": true, "ksh": true, "tcsh": true, "csh": true,
 }
 
 func isShell(cmd string) bool {
