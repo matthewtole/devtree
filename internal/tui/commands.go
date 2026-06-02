@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -102,13 +104,31 @@ func cmdSwitch(tc *tmux.Client, session, window, command, worktreePath string) t
 }
 
 // cmdAttach focuses the tmux window containing the service.
+//
+// switch-client and attach-session both need to inspect the calling process's
+// controlling terminal to find the tmux client. Our normal run() method
+// captures stdin into a buffer, which makes tmux report "not a terminal".
+// tea.ExecProcess suspends the TUI and gives the subprocess the real terminal,
+// so tmux can identify the client and switch immediately.
 func cmdAttach(tc *tmux.Client, session, window string) tea.Cmd {
-	return func() tea.Msg {
-		if err := tc.Attach(session, window); err != nil {
+	target := session + ":" + window
+
+	var args []string
+	if tc.Socket != "" {
+		args = append(args, "-L", tc.Socket)
+	}
+	if os.Getenv("TMUX") != "" {
+		args = append(args, "switch-client", "-t", target)
+	} else {
+		args = append(args, "attach-session", "-t", target)
+	}
+
+	return tea.ExecProcess(exec.Command("tmux", args...), func(err error) tea.Msg {
+		if err != nil {
 			return errMsg{err}
 		}
 		return nil
-	}
+	})
 }
 
 // cmdLoadWorktrees fetches the worktree list for a repo asynchronously.
