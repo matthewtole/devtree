@@ -1,0 +1,4 @@
+/devtree
+*.test
+*.out
+.DS_Store
