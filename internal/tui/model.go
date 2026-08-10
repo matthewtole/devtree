@@ -193,6 +193,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if p.Selected != nil {
 			row := m.rows[m.cursor]
 			m.picker = nil
+			if row.status == statusAbsent {
+				// No tmux window yet — just record the selection in the model.
+				// cmdStart will pick it up via effectiveWorktree().
+				m.rows[m.cursor].worktree = p.Selected.Path
+				return m, nil
+			}
 			return m, cmdSwitch(m.tc, SessionName, row.svc.Name, row.svc.Command, p.Selected.Path)
 		}
 		m.picker = &p
@@ -478,7 +484,8 @@ func cmdPoll(tc *tmux.Client, rows []serviceRow, termHeight int) tea.Cmd {
 			}
 			if !has {
 				updated.status = statusAbsent
-				updated.worktree = ""
+				// Preserve any in-memory worktree selection so the user's
+				// pending choice survives across polls.
 				updated.snippet = nil
 				result[i] = updated
 				continue
