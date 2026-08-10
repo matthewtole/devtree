@@ -180,11 +180,20 @@ func (c *Client) CapturePane(session, window string) (string, error) {
 }
 
 // CapturePaneN captures the last nLines of content from the pane, including
-// scrollback history above the visible area.
+// scrollback history above the visible area. The -e flag preserves ANSI
+// escape sequences so callers can render colours.
 func (c *Client) CapturePaneN(session, window string, nLines int) (string, error) {
-	return c.run("capture-pane", "-p",
+	return c.run("capture-pane", "-p", "-e",
 		"-S", fmt.Sprintf("-%d", nLines),
 		"-t", session+":"+window)
+}
+
+// ResizeWindow sets the width of a tmux window (and its pane) so that
+// capture-pane returns lines formatted at that width.
+func (c *Client) ResizeWindow(session, window string, width int) error {
+	_, err := c.run("resize-window", "-t", session+":"+window,
+		"-x", fmt.Sprintf("%d", width))
+	return err
 }
 
 // Attach switches focus to the given window. If called from inside tmux

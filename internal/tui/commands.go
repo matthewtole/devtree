@@ -132,6 +132,21 @@ func cmdAttach(tc *tmux.Client, session, window string) tea.Cmd {
 	})
 }
 
+// cmdResizeWindows sets all existing tmux windows to the given width so that
+// capture-pane returns lines formatted at the viewport's actual width.
+func cmdResizeWindows(tc *tmux.Client, session string, rows []serviceRow, width int) tea.Cmd {
+	snapshot := make([]serviceRow, len(rows))
+	copy(snapshot, rows)
+	return func() tea.Msg {
+		for _, row := range snapshot {
+			if row.status != statusAbsent {
+				_ = tc.ResizeWindow(session, row.svc.Name, width)
+			}
+		}
+		return nil
+	}
+}
+
 // cmdLoadWorktrees fetches the worktree list for a repo asynchronously.
 func cmdLoadWorktrees(repoPath string) tea.Cmd {
 	return func() tea.Msg {

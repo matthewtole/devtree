@@ -8,7 +8,11 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/matthewtole/devtree/internal/config"
 	"github.com/matthewtole/devtree/internal/tmux"
@@ -19,7 +23,7 @@ const (
 	pollInterval = 500 * time.Millisecond
 
 	// leftPanelWidth is the fixed width of the service list panel.
-	leftPanelWidth = 30
+	leftPanelWidth = 40
 	// divider is the string placed between the two panels.
 	divider = " │ "
 )
@@ -90,22 +94,49 @@ func (r serviceRow) effectiveWorktree() string {
 
 // Model is the root bubbletea model.
 type Model struct {
-	rows   []serviceRow
-	cursor int
-	tc     *tmux.Client
-	ready  bool
-	err    error
-	width  int
-	height int
-	picker *pickerModel
+	rows    []serviceRow
+	cursor  int
+	tc      *tmux.Client
+	ready   bool
+	err     error
+	width   int
+	height  int
+	picker  *pickerModel
+	version string
+	vp      viewport.Model
+	spin    spinner.Model
 }
 
-func New(cfg *config.Config) Model {
+func New(cfg *config.Config, version string) Model {
 	rows := make([]serviceRow, len(cfg.Services))
 	for i, s := range cfg.Services {
 		rows[i] = serviceRow{svc: s, status: statusUnknown}
 	}
-	return Model{rows: rows, tc: &tmux.Client{}}
+
+	vp := viewport.New(44, 16) // dimensions updated on WindowSizeMsg
+	vp.KeyMap = viewportKeyMap()
+
+	spin := spinner.New(
+		spinner.WithSpinner(spinner.MiniDot),
+		spinner.WithStyle(styleSpinner),
+	)
+
+	return Model{rows: rows, tc: &tmux.Client{}, version: version, vp: vp, spin: spin}
+}
+
+// viewportKeyMap returns a KeyMap that uses only PageUp/PageDown for scrolling,
+// leaving j/k/up/down free for service-list navigation.
+func viewportKeyMap() viewport.KeyMap {
+	return viewport.KeyMap{
+		PageDown:     key.NewBinding(key.WithKeys("pgdown")),
+		PageUp:       key.NewBinding(key.WithKeys("pgup")),
+		HalfPageUp:   key.NewBinding(key.WithKeys()),
+		HalfPageDown: key.NewBinding(key.WithKeys()),
+		Up:           key.NewBinding(key.WithKeys()),
+		Down:         key.NewBinding(key.WithKeys()),
+		Left:         key.NewBinding(key.WithKeys()),
+		Right:        key.NewBinding(key.WithKeys()),
+	}
 }
 
 // --- tea messages -------------------------------------------------------
@@ -117,10 +148,31 @@ type errMsg struct{ err error }
 // --- tea.Model ----------------------------------------------------------
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(cmdPoll(m.tc, m.rows, 0), cmdTick())
+	return tea.Batch(cmdPoll(m.tc, m.rows, 0), cmdTick(), m.spin.Tick)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// tickMsg and stateMsg must be handled before the picker block so the
+	// poll/render cycle keeps running even while the picker is open.
+	switch msg := msg.(type) {
+	case tickMsg:
+		return m, tea.Batch(cmdPoll(m.tc, m.rows, m.height), cmdTick())
+	case stateMsg:
+		m.rows = []serviceRow(msg)
+		m.ready = true
+		m.err = nil
+		atBottom := m.vp.AtBottom()
+		m.syncViewport(atBottom)
+		return m, nil
+	case spinner.TickMsg:
+		if !m.ready {
+			var cmd tea.Cmd
+			m.spin, cmd = m.spin.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+	}
+
 	if m.picker != nil {
 		if wt, ok := msg.(worktreesLoadedMsg); ok {
 			if wt.err != nil {
@@ -152,6 +204,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		contentH := m.height - 5
+		if contentH < 5 || m.height == 0 {
+			contentH = 18
+		}
+		rightW := m.width - leftPanelWidth - len(divider)
+		if rightW < 20 || m.width == 0 {
+			rightW = 44
+		}
+		m.vp.Width = rightW
+		m.vp.Height = contentH - 2
+		if m.ready {
+			m.syncViewport(true)
+			return m, cmdResizeWindows(m.tc, SessionName, m.rows, rightW)
+		}
+
+	case tea.MouseMsg:
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		return m, cmd
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -160,10 +231,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
+				m.syncViewport(true)
 			}
 		case "down", "j":
 			if m.cursor < len(m.rows)-1 {
 				m.cursor++
+				m.syncViewport(true)
 			}
 		case "enter", "w":
 			if m.ready && len(m.rows) > 0 {
@@ -202,19 +275,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-
-	case stateMsg:
-		m.rows = []serviceRow(msg)
-		m.ready = true
-		m.err = nil
+		// Forward remaining key events to the viewport (handles pgup/pgdn).
+		var vpCmd tea.Cmd
+		m.vp, vpCmd = m.vp.Update(msg)
+		return m, vpCmd
 
 	case errMsg:
 		m.err = msg.err
 
-	case startedMsg, stoppedMsg, switchedMsg:
+	case startedMsg, stoppedMsg:
 
-	case tickMsg:
-		return m, tea.Batch(cmdPoll(m.tc, m.rows, m.height), cmdTick())
+	case switchedMsg:
+		for i, row := range m.rows {
+			if row.svc.Name == msg.window {
+				m.rows[i].worktree = msg.worktree
+				break
+			}
+		}
 	}
 
 	return m, nil
@@ -225,7 +302,7 @@ func (m Model) View() string {
 		return "\n  " + styleError.Render("error: "+m.err.Error()) + "\n\n  press q to quit\n"
 	}
 	if !m.ready {
-		return "\n  loading…\n"
+		return "\n  " + m.spin.View() + " loading…\n"
 	}
 	if m.picker != nil {
 		return m.picker.View()
@@ -251,7 +328,7 @@ func (m Model) mainView() string {
 	rightLines := m.buildRightPanel(contentH, rightW)
 
 	var b strings.Builder
-	b.WriteString("\n  " + styleTitle.Render("devtree") + "\n\n")
+	b.WriteString("\n  " + styleTitle.Render("devtree") + "  " + styleVersion.Render("v"+m.version) + "\n\n")
 	for i := 0; i < contentH; i++ {
 		l := padToWidth(leftLines[i], leftPanelWidth)
 		r := rightLines[i]
@@ -259,7 +336,7 @@ func (m Model) mainView() string {
 	}
 	b.WriteString("\n")
 	b.WriteString("  " + styleHelp.Render(
-		"↑/k  ↓/j  navigate    ↵/w  switch worktree    s  start    x  stop    r  restart    a  attach    q  quit",
+		"↑/k  ↓/j  navigate    ↵/w  switch worktree    s  start    x  stop    r  restart    a  attach    pgup/pgdn  scroll    q  quit",
 	) + "\n")
 	return b.String()
 }
@@ -276,24 +353,35 @@ func (m Model) buildLeftPanel(height, width int) []string {
 	lines[0] = styleHeaderRow.Render("  services")
 	lines[1] = styleDivider.Render("  " + strings.Repeat("─", width-2))
 
-	// Max chars available for the service name: width minus cursor(2) dot(2) gap(2).
-	nameMax := width - 6
+	// Layout: cursor(2) + name(20) + space(1) + worktree(14) + space(1) + dot(1) = 39.
+	const nameW = 20
+	const wtW = 14
 
 	for i, row := range m.rows {
 		li := i + 2
 		if li >= height {
 			break
 		}
-		cursor := "  "
-		if i == m.cursor {
-			cursor = styleCursor.Render("▸") + " "
+
+		name := fmt.Sprintf("%-*s", nameW, truncateLine(row.svc.Name, nameW))
+		var wtText string
+		if row.worktree != "" {
+			wtText = truncateLine(filepath.Base(row.worktree), wtW)
 		}
-		name := truncateLine(row.svc.Name, nameMax)
-		line := cursor + fmt.Sprintf("%-*s", nameMax, name) + "  " + row.status.dot()
+		wtPadded := fmt.Sprintf("%-*s", wtW, wtText)
+		dot := row.status.dot()
+
 		if i == m.cursor {
-			line = styleSelected.Render(line)
+			// Build the highlighted region without nested lipgloss renders so the
+			// background colour covers the full row width without gaps from inner
+			// \x1b[0m resets. The status dot is placed outside the highlight to
+			// preserve its semantic colour.
+			prefix := padToWidth("▸ "+name+" "+wtPadded+" ", width-1)
+			lines[li] = styleSelectedRow.Render(prefix) + dot
+		} else {
+			wt := styleIdle.Render(wtPadded)
+			lines[li] = "  " + name + " " + wt + " " + dot
 		}
-		lines[li] = line
 	}
 	return lines
 }
@@ -309,30 +397,58 @@ func (m Model) buildRightPanel(height, width int) []string {
 
 	sel := m.rows[m.cursor]
 
-	// Header: service name + worktree if known.
+	// Header: service name, optional worktree, scroll position when not following.
 	header := styleSelected.Render(sel.svc.Name)
 	if sel.worktree != "" {
 		header += styleHeaderRow.Render("  " + filepath.Base(sel.worktree))
 	}
+	if !m.vp.AtBottom() {
+		pct := int(m.vp.ScrollPercent() * 100)
+		header += styleHelp.Render(fmt.Sprintf("  ↑ %d%%  pgup/pgdn", pct))
+	}
 	lines[0] = header
 	lines[1] = styleDivider.Render(strings.Repeat("─", width))
 
-	logHeight := height - 2
-	switch {
-	case sel.status == statusAbsent:
-		lines[2] = styleIdle.Render("not started")
-	case len(sel.snippet) == 0:
-		lines[2] = styleIdle.Render("no output")
-	default:
-		snip := sel.snippet
-		if len(snip) > logHeight {
-			snip = snip[len(snip)-logHeight:]
+	// Split the viewport view into individual lines for the side-by-side layout.
+	vpLines := strings.Split(m.vp.View(), "\n")
+	for i, line := range vpLines {
+		if 2+i >= height {
+			break
 		}
-		for i, line := range snip {
-			lines[2+i] = truncateLine(line, width)
-		}
+		lines[2+i] = line
 	}
 	return lines
+}
+
+// --- viewport helpers ---------------------------------------------------
+
+// syncViewport refreshes the viewport's content from the currently selected
+// service. If follow is true the view jumps to the bottom (tail mode); if
+// false the current scroll offset is preserved so the user can read history.
+func (m *Model) syncViewport(follow bool) {
+	if len(m.rows) == 0 {
+		return
+	}
+	sel := m.rows[m.cursor]
+	var sb strings.Builder
+	switch {
+	case sel.status == statusAbsent:
+		sb.WriteString(styleIdle.Render("not started"))
+	case len(sel.snippet) == 0:
+		sb.WriteString(styleIdle.Render("no output"))
+	default:
+		for i, line := range sel.snippet {
+			if i > 0 {
+				sb.WriteByte('\n')
+			}
+			// Per-line reset prevents colour from one log line bleeding into the next.
+			sb.WriteString(line + "\x1b[0m")
+		}
+	}
+	m.vp.SetContent(sb.String())
+	if follow {
+		m.vp.GotoBottom()
+	}
 }
 
 // --- poll ---------------------------------------------------------------
@@ -406,9 +522,11 @@ func isShell(cmd string) bool { return shellNames[cmd] }
 
 // trimTrailingBlanks splits s into lines and removes only the trailing empty
 // ones, preserving internal blank lines that are part of log structure.
+// ANSI escape sequences are stripped before the blank check so that a line
+// containing only colour codes (e.g. a reset) is treated as blank.
 func trimTrailingBlanks(s string) []string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+	for len(lines) > 0 && strings.TrimSpace(ansi.Strip(lines[len(lines)-1])) == "" {
 		lines = lines[:len(lines)-1]
 	}
 	return lines
@@ -429,13 +547,10 @@ func lastNonEmptyLines(s string, n int) []string {
 	return lines
 }
 
-// truncateLine clips s to max runes, appending … if trimmed.
+// truncateLine clips s to max visible columns, appending … if trimmed.
+// ANSI escape sequences are counted as zero-width so colour is preserved.
 func truncateLine(s string, max int) string {
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
-	}
-	return string(runes[:max-1]) + "…"
+	return ansi.Truncate(s, max, "…")
 }
 
 // padToWidth pads s with spaces to reach the target visible width,

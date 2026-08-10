@@ -13,6 +13,10 @@ import (
 	"github.com/matthewtole/devtree/internal/tui"
 )
 
+// Version is the current release. Set at build time via
+// -ldflags "-X main.Version=x.y.z".
+var Version = "dev"
+
 const usage = `devtree — control which git worktree your dev servers run in
 
 Usage:
@@ -56,7 +60,7 @@ func runTUI() error {
 	if err != nil {
 		return err
 	}
-	p := tea.NewProgram(tui.New(cfg), tea.WithAltScreen())
+	p := tea.NewProgram(tui.New(cfg, Version), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = p.Run()
 	return err
 }

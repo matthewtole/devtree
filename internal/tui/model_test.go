@@ -27,7 +27,7 @@ func testModel() Model {
 			{Name: "storybook", Repo: "/r/web", Command: "npm run storybook"},
 		},
 	}
-	return New(cfg)
+	return New(cfg, "test")
 }
 
 func withState(m Model) Model {
@@ -257,6 +257,37 @@ func TestModel_pickerSelectDispatchesSwitch(t *testing.T) {
 	}
 }
 
+// tickMsg while picker is open must keep the poll cycle alive and rows fresh.
+func TestModel_tickAndStateMsgSurvivePickerOpen(t *testing.T) {
+	m := withState(testModel())
+
+	// Open picker.
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.picker == nil {
+		t.Fatal("picker should be open")
+	}
+
+	// A tickMsg while the picker is open should still dispatch commands.
+	_, cmd := applyMsg(m, tickMsg{})
+	if cmd == nil {
+		t.Error("tickMsg with picker open must still dispatch a command (keeps poll cycle alive)")
+	}
+
+	// A stateMsg while the picker is open should still update rows.
+	fresh := stateMsg{
+		{svc: m.rows[0].svc, status: statusRunning, snippet: []string{"new output"}},
+		{svc: m.rows[1].svc, status: statusIdle},
+		{svc: m.rows[2].svc, status: statusAbsent},
+	}
+	m2, _ := applyMsg(m, fresh)
+	if m2.picker == nil {
+		t.Error("picker should remain open after stateMsg")
+	}
+	if got := m2.rows[0].snippet; len(got) == 0 || got[0] != "new output" {
+		t.Errorf("rows[0].snippet = %v, want [new output]", got)
+	}
+}
+
 func TestModel_pickerErrorClosesPickerAndSetsErr(t *testing.T) {
 	m := withState(testModel())
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -368,6 +399,9 @@ func TestTrimTrailingBlanks(t *testing.T) {
 		{"a\n\nb\n", []string{"a", "", "b"}}, // internal blank preserved
 		{"\n\n", nil},
 		{"a", []string{"a"}},
+		// ANSI-only trailing lines (e.g. a bare reset from capture-pane -e)
+		// must be treated as blank.
+		{"a\nb\n\x1b[0m\n\x1b[0m\n", []string{"a", "b"}},
 	}
 	for _, tc := range tests {
 		got := trimTrailingBlanks(tc.in)
@@ -441,11 +475,24 @@ func TestTruncateLine(t *testing.T) {
 		t.Errorf("short string modified: %q", got)
 	}
 	got := truncateLine("hello world", 8)
-	if len([]rune(got)) != 8 {
-		t.Errorf("truncated length = %d, want 8", len([]rune(got)))
-	}
 	if !strings.HasSuffix(got, "…") {
 		t.Errorf("truncated string should end with …, got %q", got)
+	}
+
+	// ANSI sequences must not count towards visible width.
+	colored := "\x1b[32mhello\x1b[0m" // 5 visible chars
+	if truncateLine(colored, 10) != colored {
+		t.Errorf("short coloured string should be returned unchanged")
+	}
+	longColored := "\x1b[32mhello world\x1b[0m" // 11 visible chars
+	trunc := truncateLine(longColored, 8)
+	stripped := strings.ReplaceAll(strings.ReplaceAll(trunc, "\x1b[32m", ""), "\x1b[0m", "")
+	// visible content should be ≤ 8 chars
+	if len([]rune(stripped)) > 8 {
+		t.Errorf("visible width after truncation = %d, want ≤ 8; got %q", len([]rune(stripped)), trunc)
+	}
+	if !strings.Contains(trunc, "…") {
+		t.Errorf("truncated coloured string should contain …, got %q", trunc)
 	}
 }
 
