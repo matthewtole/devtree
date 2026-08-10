@@ -83,14 +83,15 @@ func cmdRestart(tc *tmux.Client, session, window, command, worktreePath string) 
 }
 
 // cmdSwitch kills whatever is running and starts the service in the new
-// worktree. Handles the running and idle cases uniformly — a no-op C-c on
-// an idle shell is harmless.
+// worktree. Uses respawn-pane -k to atomically kill the current process and
+// get a clean shell, which is more reliable than timed C-c signals.
+// Only call this when the window already exists (running or idle).
 func cmdSwitch(tc *tmux.Client, session, window, command, worktreePath string) tea.Cmd {
 	return func() tea.Msg {
-		_ = tc.SendKeys(session, window, "C-c")
-		time.Sleep(300 * time.Millisecond)
-		_ = tc.SendKeys(session, window, "C-c")
-		time.Sleep(200 * time.Millisecond)
+		if err := tc.RespawnPane(session, window); err != nil {
+			return errMsg{err}
+		}
+		time.Sleep(100 * time.Millisecond)
 
 		keys := fmt.Sprintf("cd %s && clear && %s", shellEscape(worktreePath), command)
 		if err := tc.SendKeys(session, window, keys, "C-m"); err != nil {

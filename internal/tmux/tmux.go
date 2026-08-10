@@ -101,7 +101,8 @@ func (c *Client) ListWindows(session string) ([]string, error) {
 func isNotFound(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "session not found") ||
-		strings.Contains(s, "no current session")
+		strings.Contains(s, "no current session") ||
+		strings.Contains(s, "can't find session")
 }
 
 func (c *Client) HasWindow(session, window string) (bool, error) {
@@ -115,6 +116,14 @@ func (c *Client) HasWindow(session, window string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// RespawnPane kills any running process in the pane and starts a fresh shell.
+// This is the reliable way to stop a service before sending new commands —
+// unlike C-c, it doesn't depend on the process responding to signals.
+func (c *Client) RespawnPane(session, window string) error {
+	_, err := c.run("respawn-pane", "-k", "-t", session+":"+window)
+	return err
 }
 
 // EnsureWindow creates a window in the session if one with this name doesn't exist.
