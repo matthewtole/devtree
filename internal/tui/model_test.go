@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/matthewtole/devtree/internal/config"
 	"github.com/matthewtole/devtree/internal/git"
@@ -442,6 +443,33 @@ func TestModel_splitViewContainsServiceNames(t *testing.T) {
 	// Right panel header for the selected service (backend) should be visible.
 	if !strings.Contains(view, "│") {
 		t.Error("split view should contain the panel divider │")
+	}
+}
+
+func TestBuildLeftPanel_twoLineBlocks(t *testing.T) {
+	m := withState(testModel())
+	lines := m.buildLeftPanel(20, leftPanelWidth)
+
+	// Blocks start at line 2, after the header and divider rows.
+	first := ansi.Strip(lines[2])
+	if !strings.Contains(first, "backend") || !strings.Contains(first, "●") {
+		t.Errorf("block line 1 should have name and status icon, got %q", first)
+	}
+	if got := ansi.Strip(lines[3]); !strings.Contains(got, "backend") {
+		t.Errorf("block line 2 should show the worktree, got %q", got)
+	}
+
+	// Second service (web, idle, worktree web-feature) occupies lines 4–5.
+	if got := ansi.Strip(lines[4]); !strings.Contains(got, "web") || !strings.Contains(got, "○") {
+		t.Errorf("web block line 1 = %q, want name and idle icon", got)
+	}
+	if got := ansi.Strip(lines[5]); !strings.Contains(got, "web-feature") {
+		t.Errorf("web block line 2 = %q, want worktree name", got)
+	}
+
+	// Absent service with no worktree shows a placeholder dash.
+	if got := ansi.Strip(lines[7]); !strings.Contains(got, "—") {
+		t.Errorf("storybook block line 2 = %q, want — placeholder", got)
 	}
 }
 

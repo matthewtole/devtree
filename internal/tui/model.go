@@ -78,13 +78,6 @@ type serviceRow struct {
 	snippet  []string // lines from capture-pane, trailing blanks stripped
 }
 
-func (r serviceRow) worktreeLabel() string {
-	if r.worktree == "" {
-		return styleIdle.Render("—")
-	}
-	return filepath.Base(r.worktree)
-}
-
 func (r serviceRow) effectiveWorktree() string {
 	if r.worktree != "" {
 		return r.worktree
@@ -359,34 +352,32 @@ func (m Model) buildLeftPanel(height, width int) []string {
 	lines[0] = styleHeaderRow.Render("  services")
 	lines[1] = styleDivider.Render("  " + strings.Repeat("─", width-2))
 
-	// Layout: cursor(2) + name(20) + space(1) + worktree(14) + space(1) + dot(1) = 39.
-	const nameW = 20
-	const wtW = 14
-
+	// Each service is a two-line block: name + status dot on the first line,
+	// worktree name indented on the second.
 	for i, row := range m.rows {
-		li := i + 2
-		if li >= height {
+		nameLine := i*2 + 2
+		wtLine := nameLine + 1
+		if wtLine >= height {
 			break
 		}
 
-		name := fmt.Sprintf("%-*s", nameW, truncateLine(row.svc.Name, nameW))
-		var wtText string
+		name := truncateLine(row.svc.Name, width-6)
+		wt := "—"
 		if row.worktree != "" {
-			wtText = truncateLine(filepath.Base(row.worktree), wtW)
+			wt = truncateLine(filepath.Base(row.worktree), width-6)
 		}
-		wtPadded := fmt.Sprintf("%-*s", wtW, wtText)
 		dot := row.status.dot()
 
 		if i == m.cursor {
 			// Build the highlighted region without nested lipgloss renders so the
-			// background colour covers the full row width without gaps from inner
-			// \x1b[0m resets. The status dot is placed outside the highlight to
+			// background colour covers the full block width without gaps from
+			// inner \x1b[0m resets. The status dot sits outside the highlight to
 			// preserve its semantic colour.
-			prefix := padToWidth("▸ "+name+" "+wtPadded+" ", width-1)
-			lines[li] = styleSelectedRow.Render(prefix) + dot
+			lines[nameLine] = styleSelectedRow.Render(padToWidth("▸ "+name+" ", width-1)) + dot
+			lines[wtLine] = styleSelectedRow.Render(padToWidth("    "+wt, width-1))
 		} else {
-			wt := styleIdle.Render(wtPadded)
-			lines[li] = "  " + name + " " + wt + " " + dot
+			lines[nameLine] = padToWidth("  "+name+" ", width-1) + dot
+			lines[wtLine] = "    " + styleIdle.Render(wt)
 		}
 	}
 	return lines
