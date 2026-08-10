@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -125,6 +126,88 @@ func TestLoad_missingFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "config not found") {
 		t.Errorf("error %q does not mention missing file", err.Error())
+	}
+}
+
+func TestLoadServices_missing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nope.toml")
+	svcs, err := LoadServices(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if svcs != nil {
+		t.Errorf("expected nil services for missing file, got %v", svcs)
+	}
+}
+
+func TestLoadServices_valid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	src := `
+[[service]]
+name    = "api"
+repo    = "/repos/api"
+command = "go run ."
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	svcs, err := LoadServices(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := len(svcs), 1; got != want {
+		t.Fatalf("len = %d, want %d", got, want)
+	}
+	if svcs[0].Name != "api" {
+		t.Errorf("Name = %q, want %q", svcs[0].Name, "api")
+	}
+}
+
+func TestAppendService_createsFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "config.toml")
+	svc := Service{Name: "web", Repo: "/repos/web", Command: "npm start"}
+	if err := AppendService(path, svc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	svcs, err := LoadServices(path)
+	if err != nil {
+		t.Fatalf("load after append: %v", err)
+	}
+	if got, want := len(svcs), 1; got != want {
+		t.Fatalf("len = %d, want %d", got, want)
+	}
+	if svcs[0].Name != "web" || svcs[0].Repo != "/repos/web" || svcs[0].Command != "npm start" {
+		t.Errorf("unexpected service: %+v", svcs[0])
+	}
+}
+
+func TestAppendService_appendsToExisting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	src := `[[service]]
+name    = "api"
+repo    = "/repos/api"
+command = "go run ."
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := Service{Name: "web", Repo: "/repos/web", Command: "npm start"}
+	if err := AppendService(path, svc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	svcs, err := LoadServices(path)
+	if err != nil {
+		t.Fatalf("load after append: %v", err)
+	}
+	if got, want := len(svcs), 2; got != want {
+		t.Fatalf("len = %d, want %d", got, want)
+	}
+	if svcs[1].Name != "web" {
+		t.Errorf("second service Name = %q, want %q", svcs[1].Name, "web")
 	}
 }
 

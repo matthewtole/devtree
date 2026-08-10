@@ -33,6 +33,44 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, ".config", "devtree", "config.toml"), nil
 }
 
+// LoadServices returns the services from the config file, or nil if the file
+// does not exist yet. Unlike Load it skips full validation — use it when you
+// only need the existing service list (e.g. to check for duplicate names).
+func LoadServices(path string) ([]Service, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var cfg Config
+	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return cfg.Services, nil
+}
+
+// AppendService adds a new [[service]] block to the config file. The parent
+// directory and file are created if they don't exist yet.
+func AppendService(path string, svc Service) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	block := fmt.Sprintf("\n[[service]]\nname    = %q\nrepo    = %q\ncommand = %q\n",
+		svc.Name, svc.Repo, svc.Command)
+	if _, err := fmt.Fprint(f, block); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
 // Load reads a config file from disk and validates it.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
