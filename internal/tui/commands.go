@@ -147,10 +147,11 @@ func cmdResizeWindows(tc *tmux.Client, session string, rows []serviceRow, width 
 	}
 }
 
-// cmdLoadWorktrees fetches the worktree list for a repo asynchronously.
-func cmdLoadWorktrees(repoPath string) tea.Cmd {
+// cmdLoadWorktrees fetches the worktree list for a repo asynchronously via
+// the shared git service, so it benefits from the same cache as the poll.
+func cmdLoadWorktrees(gitSvc *git.Service, repoPath string) tea.Cmd {
 	return func() tea.Msg {
-		wts, err := git.ListWorktrees(repoPath)
+		wts, err := gitSvc.Worktrees(repoPath)
 		return worktreesLoadedMsg{worktrees: wts, err: err}
 	}
 }

@@ -33,8 +33,8 @@ func testModel() Model {
 
 func withState(m Model) Model {
 	next, _ := m.Update(stateMsg{
-		{svc: m.rows[0].svc, status: statusRunning, worktree: "/work/backend", command: "node"},
-		{svc: m.rows[1].svc, status: statusIdle, worktree: "/work/web-feature"},
+		{svc: m.rows[0].svc, status: statusRunning, worktree: "/work/backend", branch: "main", command: "node"},
+		{svc: m.rows[1].svc, status: statusIdle, worktree: "/work/web-feature", branch: "feature/checkout"},
 		{svc: m.rows[2].svc, status: statusAbsent},
 	})
 	return next.(Model)
@@ -455,21 +455,36 @@ func TestBuildLeftPanel_twoLineBlocks(t *testing.T) {
 	if !strings.Contains(first, "backend") || !strings.Contains(first, "●") {
 		t.Errorf("block line 1 should have name and status icon, got %q", first)
 	}
-	if got := ansi.Strip(lines[3]); !strings.Contains(got, "backend") {
-		t.Errorf("block line 2 should show the worktree, got %q", got)
+	if got := ansi.Strip(lines[3]); !strings.Contains(got, "main") {
+		t.Errorf("block line 2 should show the branch, got %q", got)
 	}
 
-	// Second service (web, idle, worktree web-feature) occupies lines 4–5.
+	// Second service (web, idle, branch feature/checkout) occupies lines 4–5.
 	if got := ansi.Strip(lines[4]); !strings.Contains(got, "web") || !strings.Contains(got, "○") {
 		t.Errorf("web block line 1 = %q, want name and idle icon", got)
 	}
-	if got := ansi.Strip(lines[5]); !strings.Contains(got, "web-feature") {
-		t.Errorf("web block line 2 = %q, want worktree name", got)
+	if got := ansi.Strip(lines[5]); !strings.Contains(got, "feature/checkout") {
+		t.Errorf("web block line 2 = %q, want branch name", got)
 	}
 
-	// Absent service with no worktree shows a placeholder dash.
+	// Absent service with no worktree or branch shows a placeholder dash.
 	if got := ansi.Strip(lines[7]); !strings.Contains(got, "—") {
 		t.Errorf("storybook block line 2 = %q, want — placeholder", got)
+	}
+}
+
+func TestServiceRow_branchLabel(t *testing.T) {
+	row := serviceRow{svc: config.Service{Repo: "/r/backend"}}
+	if got := row.branchLabel(); got != "—" {
+		t.Errorf("no worktree or branch: got %q, want —", got)
+	}
+	row.worktree = "/work/backend-feat"
+	if got := row.branchLabel(); got != "backend-feat" {
+		t.Errorf("worktree only: got %q, want backend-feat", got)
+	}
+	row.branch = "feature/checkout"
+	if got := row.branchLabel(); got != "feature/checkout" {
+		t.Errorf("branch known: got %q, want feature/checkout", got)
 	}
 }
 

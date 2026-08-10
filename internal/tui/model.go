@@ -15,12 +15,17 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/matthewtole/devtree/internal/config"
+	"github.com/matthewtole/devtree/internal/git"
 	"github.com/matthewtole/devtree/internal/tmux"
 )
 
 const (
 	SessionName  = "devtree"
 	pollInterval = 500 * time.Millisecond
+
+	// gitCacheTTL bounds how often the git service shells out for
+	// worktree/branch data, independent of the poll cadence.
+	gitCacheTTL = 200 * time.Millisecond
 
 	// leftPanelWidth is the fixed width of the service list panel.
 	leftPanelWidth = 40
@@ -73,9 +78,22 @@ func (s serviceStatus) String() string {
 type serviceRow struct {
 	svc      config.Service
 	worktree string        // full path stored in tmux user option; empty = unset
+	branch   string        // git branch of the effective worktree; empty if unknown
 	status   serviceStatus
 	command  string   // current pane_current_command
 	snippet  []string // lines from capture-pane, trailing blanks stripped
+}
+
+// branchLabel is the second line of a service block: the git branch when
+// known, falling back to the worktree directory name.
+func (r serviceRow) branchLabel() string {
+	if r.branch != "" {
+		return r.branch
+	}
+	if r.worktree != "" {
+		return filepath.Base(r.worktree)
+	}
+	return "—"
 }
 
 func (r serviceRow) effectiveWorktree() string {
@@ -90,6 +108,7 @@ type Model struct {
 	rows    []serviceRow
 	cursor  int
 	tc      *tmux.Client
+	gitSvc  *git.Service
 	ready   bool
 	err     error
 	width   int
@@ -114,7 +133,14 @@ func New(cfg *config.Config, version string) Model {
 		spinner.WithStyle(styleSpinner),
 	)
 
-	return Model{rows: rows, tc: &tmux.Client{}, version: version, vp: vp, spin: spin}
+	return Model{
+		rows:    rows,
+		tc:      &tmux.Client{},
+		gitSvc:  git.NewService(gitCacheTTL),
+		version: version,
+		vp:      vp,
+		spin:    spin,
+	}
 }
 
 // viewportKeyMap returns a KeyMap that uses only PageUp/PageDown for scrolling,
@@ -141,7 +167,7 @@ type errMsg struct{ err error }
 // --- tea.Model ----------------------------------------------------------
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(cmdPoll(m.tc, m.rows, 0), cmdTick(), m.spin.Tick)
+	return tea.Batch(cmdPoll(m.tc, m.gitSvc, m.rows, 0), cmdTick(), m.spin.Tick)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -149,7 +175,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// poll/render cycle keeps running even while the picker is open.
 	switch msg := msg.(type) {
 	case tickMsg:
-		return m, tea.Batch(cmdPoll(m.tc, m.rows, m.height), cmdTick())
+		return m, tea.Batch(cmdPoll(m.tc, m.gitSvc, m.rows, m.height), cmdTick())
 	case stateMsg:
 		m.rows = []serviceRow(msg)
 		m.ready = true
@@ -241,7 +267,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.ready && len(m.rows) > 0 {
 				p := newPicker(m.rows[m.cursor].svc)
 				m.picker = &p
-				return m, cmdLoadWorktrees(m.rows[m.cursor].svc.Repo)
+				return m, cmdLoadWorktrees(m.gitSvc, m.rows[m.cursor].svc.Repo)
 			}
 		case "s":
 			if m.ready && len(m.rows) > 0 {
@@ -288,6 +314,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i, row := range m.rows {
 			if row.svc.Name == msg.window {
 				m.rows[i].worktree = msg.worktree
+				// Stale until the next poll resolves it; fall back to the
+				// directory name rather than showing the old branch.
+				m.rows[i].branch = ""
 				break
 			}
 		}
@@ -362,10 +391,7 @@ func (m Model) buildLeftPanel(height, width int) []string {
 		}
 
 		name := truncateLine(row.svc.Name, width-6)
-		wt := "—"
-		if row.worktree != "" {
-			wt = truncateLine(filepath.Base(row.worktree), width-6)
-		}
+		wt := truncateLine(row.branchLabel(), width-6)
 		dot := row.status.dot()
 
 		if i == m.cursor {
@@ -454,7 +480,7 @@ func cmdTick() tea.Cmd {
 	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
-func cmdPoll(tc *tmux.Client, rows []serviceRow, termHeight int) tea.Cmd {
+func cmdPoll(tc *tmux.Client, gitSvc *git.Service, rows []serviceRow, termHeight int) tea.Cmd {
 	// Request enough lines to fill the log panel plus headroom.
 	logLines := termHeight - 7
 	if logLines < 50 {
@@ -505,8 +531,40 @@ func cmdPoll(tc *tmux.Client, rows []serviceRow, termHeight int) tea.Cmd {
 
 			result[i] = updated
 		}
+
+		branches := branchLabels(gitSvc, result)
+		for i := range result {
+			result[i].branch = branches[result[i].effectiveWorktree()]
+		}
+
 		return stateMsg(result)
 	}
+}
+
+// branchLabels resolves the current branch of every worktree in every repo
+// referenced by rows, keyed by worktree path. Best-effort: a repo that fails
+// to list is skipped rather than taking down the whole poll — affected rows
+// just fall back to their worktree directory name.
+func branchLabels(gitSvc *git.Service, rows []serviceRow) map[string]string {
+	labels := make(map[string]string)
+	seen := make(map[string]bool)
+
+	for _, row := range rows {
+		repo := row.svc.Repo
+		if seen[repo] {
+			continue
+		}
+		seen[repo] = true
+
+		wts, err := gitSvc.Worktrees(repo)
+		if err != nil {
+			continue
+		}
+		for _, wt := range wts {
+			labels[wt.Path] = wt.Label()
+		}
+	}
+	return labels
 }
 
 var shellNames = map[string]bool{
